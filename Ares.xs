@@ -455,19 +455,17 @@ BOOT:
 PROTOTYPES: ENABLE
 
 
-void
+SV *
 version()
-	PPCODE:
-		if ( GIMME_V == G_VOID )
-			XSRETURN( 0 );
+	INIT:
+		int ver_num;
+		const char *ver_str;
+	CODE:
+		ver_str = ares_version( &ver_num );
 
-		{
-			int ver_num;
-			const char *ver_str;
-			ver_str = ares_version( &ver_num );
-
-			XPUSHs( newSViv( ver_num ) );
-			if ( GIMME_V != G_SCALAR )
-				XPUSHs( newSVpv( ver_str, 0 ) );
-		}
+		RETVAL = newSVpv( ver_str, 0 );
+		SvUV_set( RETVAL, ver_num );
+		SvIOK_on( RETVAL );
+	OUTPUT:
+		RETVAL
 

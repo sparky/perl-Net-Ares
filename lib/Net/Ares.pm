@@ -45,7 +45,8 @@ Net::Ares - Perl interface for c-ares library
  use Net::Ares;
  print $Net::Ares::VERSION;
 
- printf "Ares: 0x%06X (%s)\n", Net::Ares::version();
+ my $ver = Net::Ares::version();
+ printf "Ares: 0x%06X ($ver)\n", 0+$ver;
 
 =head1 DOCUMENTATION
 
