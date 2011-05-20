@@ -1,7 +1,7 @@
 INPUT
 T_PTROBJ_ARES
 	$var = ($type) pares_getptr_fatal( aTHX_ $arg,
-		&pares_${my$n=$ntype;$n=~s/.*::(.)/\l$1/;\$n}_vtbl,
+		&pares_vtbl,
 		\"$var\", \"$ntype\" );
 
 TYPEMAP

@@ -68,6 +68,18 @@
 # define PTR2nat(p)	(PTRV)(p)
 #endif
 
+
+#define ARES_DIE( ret )			\
+	STMT_START {				\
+		int code = (ret);		\
+		if ( code != ARES_SUCCESS ) {	\
+			SV *errsv = sv_newmortal();	\
+			sv_setref_iv( errsv, "Net::Ares::Code", code );	\
+			croak_sv( errsv );	\
+		}						\
+	} STMT_END
+
+
 #if 0
 
 /*
@@ -286,11 +298,12 @@ pares_call( pTHX_ callback_t *cb, int argnum, SV **args )
 #define PERL_ARES_CALL( cb, arg ) \
 	pares_call( aTHX_ (cb), sizeof( arg ) / sizeof( (arg)[0] ), (arg) )
 
+#endif
 
 static int
-pares_any_magic_nodup( pTHX_ MAGIC *mg, CLONE_PARAMS *param )
+pares_nodup( pTHX_ MAGIC *mg, CLONE_PARAMS *param )
 {
-	warn( "Net::Ares::(Easy|Form|Multi) does not support cloning\n" );
+	warn( "Net::Ares does not support cloning\n" );
 	mg->mg_ptr = NULL;
 	return 1;
 }
@@ -361,8 +374,6 @@ pares_setptr( pTHX_ SV *self, MGVTBL *vtbl, void *ptr )
 	mg->mg_flags |= MGf_DUP;
 }
 
-#endif
-
 /* code shamelessly stolen from ExtUtils::Constant */
 static void
 pares_constant_add( pTHX_ HV *hash, const char *name, I32 namelen,
@@ -402,9 +413,83 @@ struct pv_s {
 #define PV_CONST( c ) \
 	{ #c, sizeof( #c ) - 1, c, sizeof( c ) - 1 }
 
+struct pares_object_s {
+	/* this perl object */
+	SV *perl_self;
+
+	/* ares channel */
+	ares_channel channel;
+};
+
+typedef struct pares_object_s pares_object_t;
+typedef pares_object_t *Net__Ares;
+
+
+static pares_object_t *
+pares_new( pTHX_ SV *options )
+{
+	pares_object_t *ares;
+	ares_channel channel;
+	int code;
+
+	code = ares_init( &channel );
+	ARES_DIE( code );
+
+	Newxz( ares, 1, pares_object_t );
+	ares->channel = channel;
+
+	return ares;
+}
+
+static pares_object_t *
+pares_dup( pTHX_ pares_object_t *source )
+{
+	pares_object_t *ares;
+	ares_channel channel;
+	int code;
+
+	code = ares_dup( &channel, source->channel );
+	ARES_DIE( code );
+
+	Newxz( ares, 1, pares_object_t );
+	ares->channel = channel;
+
+	return ares;
+}
+
+static int
+pares_free( pTHX_ SV *sv, MAGIC *mg )
+{
+	if ( mg->mg_ptr ) {
+		pares_object_t *ares = (void *)mg->mg_ptr;
+
+		/* prevent recursive destruction */
+		SvREFCNT( sv ) = 1 << 30;
+
+		/* WARNING: this will call callbacks */
+		ares_destroy( ares->channel );
+
+		Safefree( ares );
+
+		SvREFCNT( sv ) = 0;
+	}
+	return 0;
+}
+
+static MGVTBL pares_vtbl = {
+	NULL, NULL, NULL, NULL
+	,pares_free
+	,NULL
+	,pares_nodup
+#ifdef MGf_LOCAL
+	,NULL
+#endif
+};
+
+
 
 /* default base object */
-//#define HASHREF_BY_DEFAULT		newRV_noinc( sv_2mortal( (SV *) newHV() ) )
+#define HASHREF_BY_DEFAULT		newRV_noinc( sv_2mortal( (SV *) newHV() ) )
 
 MODULE = Net::Ares	PACKAGE = Net::Ares
 
@@ -413,7 +498,9 @@ BOOT:
 		/* XXX 1: this is _not_ thread safe */
 		static int run_once = 0;
 		if ( !run_once++ ) {
-			ares_library_init( ARES_LIB_INIT_ALL );
+			int code;
+			code = ares_library_init( ARES_LIB_INIT_ALL );
+			ARES_DIE( code );
 			atexit( ares_library_cleanup );
 		}
 	}
@@ -454,9 +541,9 @@ BOOT:
 
 PROTOTYPES: ENABLE
 
-
 SV *
 version()
+	PROTOTYPE: ;$
 	INIT:
 		int ver_num;
 		const char *ver_str;
@@ -469,3 +556,231 @@ version()
 	OUTPUT:
 		RETVAL
 
+
+int
+CLONE_SKIP( pkg )
+	SV *pkg
+	CODE:
+		(void) pkg;
+		RETVAL = 1;
+	OUTPUT:
+		RETVAL
+
+
+void
+new( sclass="Net::Ares", base=HASHREF_BY_DEFAULT, options=NULL )
+	const char *sclass
+	SV *base
+	SV *options
+	PREINIT:
+		pares_object_t *ares;
+		HV *stash;
+	PPCODE:
+		if ( ! SvOK( base ) || ! SvROK( base ) )
+			croak( "object base must be a valid reference\n" );
+
+		ares = pares_new( aTHX_ options );
+
+		pares_setptr( aTHX_ base, &pares_vtbl, ares );
+		stash = gv_stashpv( sclass, 0 );
+		ST(0) = sv_bless( base, stash );
+
+		ares->perl_self = SvRV( ST(0) );
+		XSRETURN(1);
+
+
+void
+dup( ares, base=HASHREF_BY_DEFAULT )
+	Net::Ares ares
+	SV *base
+	PREINIT:
+		pares_object_t *clone;
+		const char *sclass;
+		HV *stash;
+	PPCODE:
+		if ( ! SvOK( base ) || ! SvROK( base ) )
+			croak( "object base must be a valid reference\n" );
+
+		sclass = sv_reftype( SvRV( ST(0) ), TRUE );
+		clone = pares_dup( aTHX_ ares );
+
+		pares_setptr( aTHX_ base, &pares_vtbl, clone );
+		stash = gv_stashpv( sclass, 0 );
+		ST(0) = sv_bless( base, stash );
+
+		ares->perl_self = SvRV( ST(0) );
+		XSRETURN(1);
+
+
+void
+cancel( ares )
+	Net::Ares ares
+	CODE:
+		ares_cancel( ares->channel );
+
+
+void
+set_local_ip4( ares, local_ip )
+	Net::Ares ares
+	SV *local_ip
+	PREINIT:
+		unsigned int ip;
+		const unsigned char *src;
+		STRLEN len;
+	CODE:
+		if ( SvOK( local_ip ) )
+			croak( "Invalid local_ip." );
+
+		src = (const unsigned char *) SvPV( local_ip, len );
+		if ( len != sizeof( unsigned int ) )
+			croak( "Invalid local_ip size." );
+
+		ip = src[0] << 24 | src[1] << 16 | src[2] << 8 | src[3];
+
+		ares_set_local_ip4( ares->channel, ip );
+
+
+void
+set_local_ip6( ares, local_ip6 )
+	Net::Ares ares
+	SV *local_ip6
+	PREINIT:
+		const unsigned char *src;
+		STRLEN len;
+	CODE:
+		if ( SvOK( local_ip6 ) )
+			croak( "Invalid local_ip6." );
+
+		src = (const unsigned char *) SvPV( local_ip6, len );
+		if ( len != 16 )
+			croak( "Invalid local_ip6 size." );
+
+		ares_set_local_ip6( ares->channel, src );
+
+
+void
+set_local_dev( ares, local_dev_name )
+	Net::Ares ares
+	SV *local_dev_name
+	CODE:
+		if ( SvOK( local_dev_name ) )
+			croak( "Invalid local_dev_name." );
+
+		ares_set_local_dev( ares->channel, SvPV_nolen( local_dev_name ) );
+
+=for later
+
+void
+set_socket_callback( ares, callback, userdata=NULL )
+	Net::Ares ares
+	SV *local_dev_name
+	SV *userdata
+	CODE:
+		/* TODO */
+
+void
+send( ares, query, callback, userdata=NULL )
+	CODE:
+		/* */
+
+void
+query( ares, name, dnsclass, type, callback, userdata=NULL )
+	CODE:
+		/* */
+
+void
+search( ares, name, dnsclass, type, callback, userdata=NULL )
+	CODE:
+		/* */
+
+void
+gethostbyname( ares, name, family, callback, userdata=NULL )
+	CODE:
+		/* XXX */
+
+void
+gethostbyname_file( ares, name, family, host )
+	CODE:
+		/* */
+
+void
+gethostbyaddr( ares, addr, family, callback, userdata=NULL )
+	CODE:
+		/* */
+
+void
+getnameinfo( ares, sa, flags, callback, userdata=NULL )
+	CODE:
+		/* */
+
+void
+fds( ares )
+	Net::Ares ares
+	PPCODE:
+		/* XXX: return ( $rfds, $wfds ) */
+
+void
+getsock( ares )
+	Net::Ares ares
+	PPCODE:
+		/* ??? */
+
+SV *
+timeout( ares, max=NULL )
+	Net::Ares ares
+	SV *max;
+	CODE:
+		/* XXX */
+	OUTPUT:
+		RETVAL
+
+void
+process( ares, read_fds, write_fds )
+	CODE:
+		/* XXX */
+
+void
+process_fd( ares, read_fd, write_fd )
+	CODE:
+		/* ??? */
+
+void
+mkquery( name, dnsclass, type, id, rd, buf )
+	CODE:
+		/* */
+
+void
+set_servers( ares, servers )
+	Net::Ares ares
+	SV *servers
+	CODE:
+		/* ??? */
+
+void
+set_servers_csv( ares, servers )
+	Net::Ares ares
+	SV *servers
+	CODE:
+		/* ??? */
+
+void
+get_servers( ares )
+	Net::Ares ares
+	CODE:
+		/* ??? */
+
+
+=cut
+
+SV *
+strerror( ... )
+	PROTOTYPE: $;$
+	PREINIT:
+		const char *errstr;
+	CODE:
+		if ( items < 1 || items > 2 )
+			croak( "Usage: Net::Ares::strerror( [ares], errnum )" );
+		errstr = ares_strerror( SvIV( ST( items - 1 ) ) );
+		RETVAL = newSVpv( errstr, 0 );
+	OUTPUT:
+		RETVAL
