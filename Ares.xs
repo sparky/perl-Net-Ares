@@ -628,7 +628,7 @@ set_local_ip4( ares, local_ip )
 		const unsigned char *src;
 		STRLEN len;
 	CODE:
-		if ( SvOK( local_ip ) )
+		if ( ! SvOK( local_ip ) )
 			croak( "Invalid local_ip." );
 
 		src = (const unsigned char *) SvPV( local_ip, len );
@@ -648,7 +648,7 @@ set_local_ip6( ares, local_ip6 )
 		const unsigned char *src;
 		STRLEN len;
 	CODE:
-		if ( SvOK( local_ip6 ) )
+		if ( ! SvOK( local_ip6 ) )
 			croak( "Invalid local_ip6." );
 
 		src = (const unsigned char *) SvPV( local_ip6, len );
@@ -661,19 +661,16 @@ set_local_ip6( ares, local_ip6 )
 void
 set_local_dev( ares, local_dev_name )
 	Net::Ares ares
-	SV *local_dev_name
+	const char *local_dev_name
 	CODE:
-		if ( SvOK( local_dev_name ) )
-			croak( "Invalid local_dev_name." );
-
-		ares_set_local_dev( ares->channel, SvPV_nolen( local_dev_name ) );
+		ares_set_local_dev( ares->channel, local_dev_name );
 
 =for later
 
 void
 set_socket_callback( ares, callback, userdata=NULL )
 	Net::Ares ares
-	SV *local_dev_name
+	SV *callback
 	SV *userdata
 	CODE:
 		/* TODO */
@@ -695,8 +692,17 @@ search( ares, name, dnsclass, type, callback, userdata=NULL )
 
 void
 gethostbyname( ares, name, family, callback, userdata=NULL )
+	Net::Ares ares
+	const char *name,
+	int family
+	SV *callback
+	SV *userdata
+	PREINIT:
+		pares_cbentry_t *cbentry;
 	CODE:
-		/* XXX */
+		cbentry = pares_cb_insert( ares, callback, userdata )
+		ares_gethostbyname( ares->channel, name, family,
+			pares_host_callback, cbentry );
 
 void
 gethostbyname_file( ares, name, family, host )
@@ -748,6 +754,37 @@ void
 mkquery( name, dnsclass, type, id, rd, buf )
 	CODE:
 		/* */
+
+void
+expand_name( encoded, buffer )
+	const unsigned char *encoded
+	SV *buffer
+	PREINIT:
+		const unsigned char *bufferc;
+		STRLEN len;
+		char *name;
+		long enclen;
+		int code;
+	CODE:
+		if ( ! SvOK( buffer ) )
+			croak( "Invalid buffer argument." );
+
+		bufferc = (const unsigned char *) SvPV( buffer, len );
+
+		code = ares_expand_name( encoded, bufferc, len,
+			&name, &enclen );
+		ARES_DIE( code );
+
+		ST(0) = sv_2mortal( newSVpv( name, 0 ) );
+
+		ares_free_string( name );
+
+		if ( GIMME_V != G_ARRAY )
+			XSRETURN( 1 );
+
+		ST(1) = sv_2mortal( newSViv( enclen ) );
+		XSRETURN( 2 );
+
 
 void
 set_servers( ares, servers )
